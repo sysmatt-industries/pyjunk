@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
 
-import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil
+import os, sys, logging, time, pprint, warnings, argparse, re, configparser, shutil, fcntl
 
-PROJECT_PATTERN = '^\w+-\d+$' # ex: AAA-NNNNN 
 
 warnings.filterwarnings('ignore')
 ME = os.path.basename(sys.argv[0])
 loggingFormat='%(asctime)s %(filename)s: %(message)s'
-logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format=loggingFormat)
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format=loggingFormat)
 logger = logging.getLogger(ME)
 start_time = time.time()
 configIni = {}
@@ -24,6 +23,12 @@ def bomb(chunk):
 	logger.error("%s",chunk)
 	sys.exit(1)
 
+def say(chunk):
+	logger.info("%s",chunk)
+
+def debug(chunk):
+	logger.debug("%s",chunk)
+
 def majorModeHandler(arg):
     """
     Given the MODEorPROJECT agument, we will determine if we are a per-project or major mode
@@ -31,19 +36,23 @@ def majorModeHandler(arg):
     """
     # Convert to list if not
     if not isinstance(arg,(list,)): arg = [arg]
-
-    if os.path.isdir(arg[0]):
-        logger.debug("Argument [{}] is a directory".format(arg[0]))
-    elif isProjectId(arg[0]):
-        logger.debug("Argument [{}] is a Project ID".format(arg[0]))
-    elif isSearch(arg[0]):
-        logger.debug("Argument [{}] is a Search".format(arg[0]))
+    # init shortcut, If we are not an init, must do sanity check
+    if arg[0].lower() == "init":
+        initTree(arg[1:])
     else:
-        logger.debug("Argument [{}] must be a major mode".format(arg[0]))
-        handleMajorMode(arg)
+        sanityCheck()
+        if os.path.isdir(arg[0]):
+            logger.debug("Argument [{}] is a directory".format(arg[0]))
+        elif isProjectId(arg[0]):
+            logger.debug("Argument [{}] is a Project ID".format(arg[0]))
+        elif isSearch(arg[0]):
+            logger.debug("Argument [{}] is a Search".format(arg[0]))
+        else:
+            logger.debug("Argument [{}] must be a major mode".format(arg[0]))
+            handleMajorMode(arg)
 
 def isProjectId(arg):
-    if re.match(PROJECT_PATTERN, arg, re.ASCII): return True
+    if re.match(config['PROJECT_PATTERN'], arg, re.ASCII): return True
     return False
 
 def isSearch(arg):
@@ -54,9 +63,8 @@ def handleMajorMode(arg):
 
     # execute built-in major mode, search plugins next
     testArg = arg[0].lower()
-    if testArg == "init":
-        initTree(arg[1:])
-    elif testArg == "list":
+    # Major more cases
+    if testArg == "list":
         bomb("not implemented")
     elif testArg == "new":
         bomb("not implemented")
@@ -71,36 +79,67 @@ def initTree(arg):
         bomb("Can not init tree, parent directory [{}] is missing or not a directory".format(PROJECT_TREE_BASE))
     if os.path.exists(PROJECT_TREE):
         bomb("Can not init tree, PROJECT_TREE directory [{}] already exists".format(PROJECT_TREE))
-    os.umask(config['UMASK'])
+    os.umask(int(str(config['UMASK']),8))
     ourMkdir(PROJECT_TREE)
     ourMkdir(CONFIG_DIR)
     with open(CONFIG_FILE, 'w') as cf:
         configIni.write(cf)
+    nextProjectNumber() # initialize
+    say("Initialized new project tree under [{}]".format(PROJECT_TREE))
+    say("Confirm or Modify configuration in [{}] as needed.".format(CONFIG_FILE))
+    say("Current Configuration:\n" + open(CONFIG_FILE).read())
+    say("[done]")
+
 
 def defaultConfig():
     global configIni, config
     configIni = configparser.ConfigParser()
     configIni['default'] = {
-            "DIRMODE" : 0o2770,
-            "FILEMODE": 0o0660,
-            "UMASK"     : 0o0007,
-            "GROUP"     : "wheel"
+            "DIRMODE" : "2770",
+            "FILEMODE": "0660",
+            "UMASK"     : "0007",
+            "GROUP"     : "wheel",
+            "PROJECT_PATTERN" : '^\w+-\d+$', # ex: AAA-NNNNN 
+            "PROJECT_PREFIX" : "PRJ-",  # Note, must match above
+            "PROJECT_ZEROPAD" : 5,  
+            "SPACEREPLACE" : "-"  # When making file/dirnames, replace spaces with SPACEREPLACE
             }
     config = configIni['default']
 
 def ourMkdir(dir):
-    mkdir(dir,mode=config['DIRMODE'])
+    os.mkdir(dir,mode=int(str(config['DIRMODE']),8))
+    os.chmod(dir,int(str(config['DIRMODE']),8))
     if config['GROUP']:
         shutil.chown(dir,group=config['GROUP'])
 
+def nextProjectNumber():
+    idFile = "{}/nextId".format(CONFIG_DIR)
+    if not os.path.exists(idFile):
+        with open(idFile, "w") as f:
+            f.write("0")
+        return(0)
+    else:
+        with open(idFile, "w") as f:
+            fcntl.flock(f,fcntl.LOCK_EX)  # Note: this is blocking
+            thisId = int(f.readline())
+            f.seek(0)
+            f.write(str(thisId + 1))
+        return(thisId)
+    
+
 def searchMajorPlugins(arg):
     bomb("search not implemented")
+
+def sanityCheck():
+    if not os.path.exists(PROJECT_TREE):
+        bomb("Project tree not initialized? Missing [{}]".format(PROJECT_TREE))
 
 if not PROJECT_TREE:
     bomb("PROJECT_TREE is not set, Check environment variable {}".format(ENV_PROJECT_TREE))
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-v", "--verbose",  help="increase output verbosity", action="store_true")
+parser.add_argument("-v", "--verbose",  help="increase output verbosity (default)", action="store_true")
+parser.add_argument("-q", "--quiet",    help="decrease output verbosity", action="store_true")
 parser.add_argument("-d", "--debug",    help="enable debugging output", action="store_true")
 parser.add_argument("MODEorPROJECT",    help="provide a major MODE or PROJECT identifier", default="list", nargs='*')
 args = parser.parse_args()
@@ -110,6 +149,8 @@ if args.verbose:
     logger.setLevel(logging.INFO)
 if args.debug:
     logger.setLevel(logging.DEBUG)
+if args.quiet:
+    logger.setLevel(logging.WARNING)
 
 
 majorModeHandler(args.MODEorPROJECT)
